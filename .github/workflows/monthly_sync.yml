@@ -1,18 +1,29 @@
 name: Monthly FAA Sync
+
 on:
+  workflow_dispatch: # Allows you to run it manually with a button
   schedule:
-    - cron: '0 0 1 * *' # Runs at midnight on the 1st of every month
-  workflow_dispatch: # Allows you to click a button to run it manually
+    - cron: '0 0 1 * *' # Runs on the 1st of every month
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-      - run: pip install pandas requests supabase
-      - env:
+
+      - name: Install dependencies
+        run: |
+          pip install pandas requests supabase
+
+      - name: Run python sync.py
+        env:
+          # THIS IS THE PART THAT CONNECTS SECRETS TO THE SCRIPT
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python sync.py

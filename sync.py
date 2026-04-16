@@ -31,41 +31,43 @@ def update_registry():
         zip_ref.extract("ACFTREF.txt")
 
     print("Loading Data...")
-    # Load files with the correct encoding
     master = pd.read_csv("MASTER.txt", encoding='ISO-8859-1', low_memory=False)
     ref = pd.read_csv("ACFTREF.txt", encoding='ISO-8859-1', low_memory=False)
 
-    # --- AGGRESSIVE COLUMN CLEANING ---
-    # This removes the 'ï»¿' and any spaces from EVERY column in BOTH files
+    # Clean column names for both files
     for df_temp in [master, ref]:
         df_temp.columns = [c.strip().replace('ï»¿', '') for c in df_temp.columns]
     
-    print(f"Master columns cleaned: {list(master.columns[:5])}")
-    print(f"Ref columns cleaned: {list(ref.columns[:5])}")
-
     print("Merging Tables...")
     # Join on the Manufacturer/Model code
-    # Master key: 'MFR MDL CODE', Reference key: 'CODE'
-    try:
-        df = pd.merge(master, ref, left_on='MFR MDL CODE', right_on='CODE', how='inner')
-    except KeyError as e:
-        raise Exception(f"❌ Merge failed. Could not find column: {e}. Check the printout above for available names.")
+    df = pd.merge(master, ref, left_on='MFR MDL CODE', right_on='CODE', how='inner')
+    
+    # Debug: Print all column names available after merge to ensure we have what we need
+    print(f"Available columns after merge: {list(df.columns)}")
 
     print("Filtering for Small Fixed-Wing Aircraft...")
-    # TYPE-ACFT: 4 or 5 (Fixed wing single/multi engine)
-    # AC-WEIGHT: CLASS 1 (Small)
-    # STATUS CODE: A (Active)
+    # Logic: 
+    # 'AC-WEIGHT' and 'TYPE-ACFT' usually come from the REF table
+    # 'STATUS CODE' usually comes from the MASTER table
+    
+    # We check if they were renamed during merge, otherwise use standard names
+    col_weight = 'AC-WEIGHT' if 'AC-WEIGHT' in df.columns else 'AC-WEIGHT_y'
+    col_type = 'TYPE-ACFT' if 'TYPE-ACFT' in df.columns else 'TYPE-ACFT_y'
+    col_status = 'STATUS CODE' if 'STATUS CODE' in df.columns else 'STATUS CODE_x'
+    col_mfr = 'MFR' if 'MFR' in df.columns else 'MFR_y'
+    col_model = 'MODEL' if 'MODEL' in df.columns else 'MODEL_y'
+
     filtered_df = df[
-        (df['AC-WEIGHT'].str.strip() == 'CLASS 1') & 
-        (df['STATUS CODE'].str.strip() == 'A') &
-        (df['TYPE-ACFT'].astype(str).str.strip().isin(['4', '5']))
+        (df[col_weight].astype(str).str.strip() == 'CLASS 1') & 
+        (df[col_status].astype(str).str.strip() == 'A') &
+        (df[col_type].astype(str).str.strip().isin(['4', '5']))
     ].copy()
 
     # Map to your Supabase columns
     final_df = pd.DataFrame()
     final_df['n_number'] = "N" + filtered_df['N-NUMBER'].astype(str).str.strip()
-    final_df['mfr'] = filtered_df['MFR_y'].astype(str).str.strip()
-    final_df['model'] = filtered_df['MODEL_y'].astype(str).str.strip()
+    final_df['mfr'] = filtered_df[col_mfr].astype(str).str.strip()
+    final_df['model'] = filtered_df[col_model].astype(str).str.strip()
     final_df['year'] = filtered_df['YEAR MFR'].astype(str).str.strip()
 
     records = final_df.to_dict('records')

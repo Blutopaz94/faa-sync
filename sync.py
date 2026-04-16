@@ -13,81 +13,69 @@ def get_supabase_client():
 
 def update_registry():
     faa_url = "https://registry.faa.gov/database/ReleasableAircraft.zip"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
     print("Downloading FAA Database...")
     r = requests.get(faa_url, headers=headers, stream=True, timeout=120)
     
     if r.status_code == 200:
         with open("faa_data.zip", "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.write(r.content)
         print("✅ Download successful.")
     else:
-        print(f"❌ Server Error {r.status_code}")
-        return
+        raise Exception(f"❌ FAA Server error {r.status_code}")
 
-    print("Extracting MASTER.txt...")
+    print("Extracting files...")
     with zipfile.ZipFile("faa_data.zip", "r") as zip_ref:
         zip_ref.extract("MASTER.txt")
+        zip_ref.extract("ACFTREF.txt")
 
-    print("Processing Data...")
-    # Read the file. Using encoding='utf-8-sig' handles the hidden BOM characters
-    df = pd.read_csv("MASTER.txt", encoding='ISO-8859-1', low_memory=False)
-    
-    # CLEAN COLUMNS AGGRESSIVELY
-    # This strips spaces AND removes hidden special characters
-    df.columns = df.columns.str.strip().str.replace('"', '').str.replace("'", "")
-    
-    print(f"Detected columns: {list(df.columns[:10])}...") # Debug print
+    print("Loading and Merging Data...")
+    # Load Master list (Planes)
+    master = pd.read_csv("MASTER.txt", encoding='ISO-8859-1', low_memory=False)
+    master.columns = master.columns.str.strip().str.replace('ï»¿', '')
 
-    # Helper to find column names even if they change slightly (e.g. AC-WEIGHT vs AC WEIGHT)
-    def find_col(target):
-        for col in df.columns:
-            if target.upper() in col.upper().replace(' ', '').replace('-', ''):
-                return col
-        return None
+    # Load Reference list (Weights and Types)
+    ref = pd.read_csv("ACFTREF.txt", encoding='ISO-8859-1', low_memory=False)
+    ref.columns = ref.columns.str.strip()
 
-    # Identify the actual column names in this specific file
-    col_weight = find_col('ACWEIGHT')
-    col_status = find_col('REGSTATUS')
-    col_type = find_col('TYPEACFT')
-    col_nnum = find_col('NNUMBER')
-    col_mfr = find_col('MFR')
-    col_model = find_col('MODEL')
-    col_year = find_col('YEARMFR')
+    # Join the tables on the Manufacturer/Model Code
+    # In MASTER it is 'MFR MDL CODE', in ACFTREF it is 'CODE'
+    df = pd.merge(master, ref, left_on='MFR MDL CODE', right_on='CODE', how='inner')
 
-    if not col_weight:
-        raise Exception(f"Could not find Weight column. Available columns: {df.columns}")
-
-    print(f"Using columns: {col_weight}, {col_status}, {col_type}")
-
-    # FILTER: Small Fixed-Wing Only (Type 4 & 5, Weight Class 1)
-    # We use .astype(str) to ensure we can strip and compare accurately
+    print("Filtering for Small Fixed-Wing Aircraft...")
+    # --- UPDATED FILTER ---
+    # AC-WEIGHT: CLASS 1 (Small)
+    # STATUS CODE: A (Active)
+    # TYPE-ACFT_y: 4 or 5 (Fixed wing single/multi engine)
     filtered_df = df[
-        (df[col_weight].astype(str).str.contains('CLASS 1', case=False, na=False)) & 
-        (df[col_status].astype(str).str.strip().upper() == 'A') &
-        (df[col_type].astype(str).str.strip().isin(['4', '5']))
+        (df['AC-WEIGHT'].str.strip() == 'CLASS 1') & 
+        (df['STATUS CODE'].str.strip() == 'A') &
+        (df['TYPE-ACFT_y'].astype(str).str.strip().isin(['4', '5']))
     ].copy()
 
+    # Map to your Supabase columns
     final_df = pd.DataFrame()
-    final_df['n_number'] = "N" + filtered_df[col_nnum].astype(str).str.strip()
-    final_df['mfr'] = filtered_df[col_mfr].astype(str).str.strip()
-    final_df['model'] = filtered_df[col_model].astype(str).str.strip()
-    final_df['year'] = filtered_df[col_year].astype(str).str.strip()
+    final_df['n_number'] = "N" + filtered_df['N-NUMBER'].astype(str).str.strip()
+    final_df['mfr'] = filtered_df['MFR_y'].astype(str).str.strip() # Use official MFR from reference
+    final_df['model'] = filtered_df['MODEL_y'].astype(str).str.strip() # Use official Model from reference
+    final_df['year'] = filtered_df['YEAR MFR'].astype(str).str.strip()
 
     records = final_df.to_dict('records')
-    print(f"Found {len(records)} aircraft. Syncing to Supabase...")
+    print(f"Found {len(records)} aircraft matching your criteria.")
 
+    # Sync to Supabase
     supabase = get_supabase_client()
-    # Batch sync
+    print("Syncing to Supabase in batches of 500...")
+    
     for i in range(0, len(records), 500):
         batch = records[i:i+500]
-        supabase.table("FAA Small Aircraft").upsert(batch).execute()
+        try:
+            supabase.table("FAA Small Aircraft").upsert(batch).execute()
+        except Exception as e:
+            print(f"⚠️ Error in batch: {e}")
 
-    print("🎉 MISSION COMPLETE.")
+    print("🎉 MISSION COMPLETE: Database updated.")
 
 if __name__ == "__main__":
     update_registry()
